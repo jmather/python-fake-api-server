@@ -1,0 +1,45 @@
+[project]
+name = "fake-api-server"
+version = "1.0.0"
+description = "In-memory fake API server for end-to-end tests. Python port of Jacob Mather's fake API."
+readme = "README.md"
+authors = [{ name = "Jacob Mather" }]
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = [
+    "fastapi>=0.115",
+    "jsonschema>=4.23",
+    "uvicorn>=0.32",
+]
+
+[project.scripts]
+fake-api-server = "fake_api_server.cli:main"
+
+[project.entry-points."fakeapi.log_hooks"]
+identity = "fake_api_server.redaction:identity"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27",
+    "pytest>=8",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = [
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
