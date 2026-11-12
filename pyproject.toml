@@ -23,6 +23,9 @@ fake-api-server = "fake_api_server.cli:main"
 [project.entry-points."fakeapi.log_hooks"]
 identity = "fake_api_server.redaction:identity"
 
+[project.entry-points."fakeapi.log_record_hooks"]
+identity = "fake_api_server.redaction:identity_record"
+
 [dependency-groups]
 dev = [
     "httpx>=0.27",

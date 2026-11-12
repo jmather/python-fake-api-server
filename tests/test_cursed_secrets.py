@@ -2,7 +2,10 @@
 
 The fixture is copied verbatim. ``parts`` arrays are concatenated at runtime and
 are never written into source as a single literal. The redaction test is
-skipped unless ``FAKEAPI_CURSED=1``. With the identity hook it is expected to
+skipped unless ``FAKEAPI_CURSED=1``. It runs three times: string hook only,
+object hook only, and both. Each run parses JSON lines and XML elements and
+searches the decoded values, so a newline that was escaped as ``\\n`` or
+``&#10;`` still counts as a leak. With the identity hooks it is expected to
 fail. ``FAKEAPI_CURSED_STRICT=1`` promotes secret-ish misses to failures.
 """
 
@@ -12,10 +15,12 @@ import os
 import secrets
 import uuid
 import warnings
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
 
+from fake_api_server.redaction import identity, identity_record
 from tests.conftest import register_user
 
 FIXTURE = Path(__file__).parent / "fixtures" / "cursed-secrets.json"
@@ -107,35 +112,162 @@ def test_fixture_keeps_split_parts_out_of_source():
     assert split >= 8
 
 
+def _walk_json(value, found: list[str]) -> None:
+    if isinstance(value, str):
+        found.append(value)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            found.append(str(key))
+            _walk_json(item, found)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _walk_json(item, found)
+
+
+def _walk_xml(element: ET.Element, found: list[str]) -> None:
+    if element.text:
+        found.append(element.text)
+    if element.tail:
+        found.append(element.tail)
+    for key, value in element.attrib.items():
+        found.append(str(key))
+        found.append(str(value))
+    for child in list(element):
+        _walk_xml(child, found)
+
+
+def _decoded_json(text: str) -> list[str] | None:
+    found: list[str] = []
+    try:
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            _walk_json(json.loads(line), found)
+    except json.JSONDecodeError:
+        return None
+    return found
+
+
+def _decoded_xml(text: str) -> list[str] | None:
+    found: list[str] = []
+    try:
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            _walk_xml(ET.fromstring(line), found)
+    except ET.ParseError:
+        return None
+    return found
+
+
+def _mode_kwargs(mode: str, string_spec: str | None, record_spec: str | None) -> dict:
+    """Identity fills whichever hook this mode is not testing."""
+    kwargs: dict = {}
+    if mode == "string":
+        kwargs["record_hook"] = identity_record
+        if string_spec:
+            kwargs["hook_from_env"] = True
+        else:
+            kwargs["log_hook"] = identity
+    elif mode == "object":
+        kwargs["log_hook"] = identity
+        if not record_spec:
+            kwargs["record_hook"] = identity_record
+    else:
+        if string_spec:
+            kwargs["hook_from_env"] = True
+        else:
+            kwargs["log_hook"] = identity
+        if not record_spec:
+            kwargs["record_hook"] = identity_record
+    return kwargs
+
+
 @pytest.mark.skipif(
     os.environ.get("FAKEAPI_CURSED") != "1",
-    reason="set FAKEAPI_CURSED=1 to run the redaction corpus; identity hook is expected to fail",
+    reason="set FAKEAPI_CURSED=1 to run the redaction corpus; identity hooks are expected to fail",
 )
 def test_cursed_secrets_do_not_appear_in_logs(make_session, tmp_path, monkeypatch):
     data = _load()
     assembled = [(entry, _assemble(entry)) for entry in data["entries"]]
+    string_spec = os.environ.get("FAKEAPI_LOG_HOOK")
+    record_spec = os.environ.get("FAKEAPI_LOG_RECORD_HOOK")
+    if string_spec:
+        monkeypatch.setenv("FAKEAPI_LOG_HOOK", string_spec)
+    if record_spec:
+        monkeypatch.setenv("FAKEAPI_LOG_RECORD_HOOK", record_spec)
+
+    strict = os.environ.get("FAKEAPI_CURSED_STRICT") == "1"
+    report = ["cursed-secrets redaction report"]
+    hard: list[str] = []
+    soft: list[str] = []
+    modes = (("string-hook", "string"), ("object-hook", "object"), ("both", "both"))
+
+    for label, mode in modes:
+        grouped = {"definitely": [], "likely": [], "secret-ish": []}
+        xml_path = tmp_path / f"cursed-{mode}.xml"
+        session = make_session(
+            capture="all",
+            xml_path=str(xml_path),
+            log_stream=__import__("io").StringIO(),
+            **_mode_kwargs(mode, string_spec, record_spec),
+        )
+        _exercise(session, assembled)
+        json_values = _decoded_json(session.log.getvalue())
+        xml_values = _decoded_xml(xml_path.read_text(encoding="utf-8"))
+        if json_values is None or xml_values is None:
+            line = (
+                "FAIL logs were not parseable "
+                f"(json={json_values is not None}, xml={xml_values is not None})"
+            )
+            hard.append(f"{label}: {line}")
+            grouped["definitely"].append(line)
+        else:
+            for entry, secret in assembled:
+                sensitivity = entry["sensitivity"]
+                needles = _needles(entry, secret)
+                if not needles:
+                    grouped[sensitivity].append(
+                        f"PASS {entry['id']} (empty value, requests above did not crash)"
+                    )
+                    continue
+                hits = []
+                if any(needle in value for needle in needles for value in json_values):
+                    hits.append("json")
+                if any(needle in value for needle in needles for value in xml_values):
+                    hits.append("xml")
+                if not hits:
+                    grouped[sensitivity].append(f"PASS {entry['id']}")
+                    continue
+                line = f"FAIL {entry['id']} leaked into {', '.join(hits)}"
+                if sensitivity == "secret-ish" and not strict:
+                    line += " (soft)"
+                    soft.append(f"{label}: {line}")
+                else:
+                    hard.append(f"{label}: {line}")
+                grouped[sensitivity].append(line)
+
+        report.append(f"mode: {label}")
+        for name in ("definitely", "likely", "secret-ish"):
+            report.append(name + ":")
+            report.extend(f"  {line}" for line in grouped[name])
+
+    if soft:
+        report.append(
+            f"soft failures: {len(soft)} (set FAKEAPI_CURSED_STRICT=1 to fail on these)"
+        )
+    rendered = "\n".join(report)
+    if soft and not hard:
+        warnings.warn(rendered, stacklevel=1)
+    if hard:
+        raise AssertionError(rendered)
+
+
+def _exercise(session, assembled) -> None:
     response_body = "\n".join(secret for _entry, secret in assembled if secret)
-    xml_path = tmp_path / "cursed.xml"
-
-    # The placeholder hook does nothing. A real redactor is whatever
-    # FAKEAPI_LOG_HOOK points at when the operator sets it.
-    hook_spec = os.environ.get("FAKEAPI_LOG_HOOK")
-    kwargs = {
-        "capture": "all",
-        "xml_path": str(xml_path),
-        "log_stream": __import__("io").StringIO(),
-        "hook_from_env": bool(hook_spec),
-    }
-    if not hook_spec:
-        from fake_api_server.redaction import identity
-
-        kwargs["log_hook"] = identity
-    else:
-        monkeypatch.setenv("FAKEAPI_LOG_HOOK", hook_spec)
-
-    session = make_session(**kwargs)
     _payload, auth = register_user(session, "cursed")
-
     canned = {
         "status": 200,
         "content": response_body,
@@ -163,52 +295,9 @@ def test_cursed_secrets_do_not_appear_in_logs(make_session, tmp_path, monkeypatc
             },
         )
         assert recorded.status_code == 201, recorded.text
-
     for entry, secret in assembled:
         _fire(session, auth, entry, secret)
-
     session.get("/c/out", headers=auth)
-    json_log = session.log.getvalue()
-    xml_log = xml_path.read_text(encoding="utf-8")
-    grouped = {"definitely": [], "likely": [], "secret-ish": []}
-    hard = []
-    soft = []
-    strict = os.environ.get("FAKEAPI_CURSED_STRICT") == "1"
-
-    for entry, secret in assembled:
-        sensitivity = entry["sensitivity"]
-        needles = _needles(entry, secret)
-        if not needles:
-            line = f"PASS {entry['id']} (empty value, no crash check beyond the requests above)"
-            grouped.setdefault(sensitivity, []).append(line)
-            continue
-        hits = []
-        if any(needle in json_log for needle in needles):
-            hits.append("json")
-        if any(needle in xml_log for needle in needles):
-            hits.append("xml")
-        if hits:
-            line = f"FAIL {entry['id']} leaked into {', '.join(hits)}"
-            if sensitivity == "secret-ish" and not strict:
-                line += " (soft)"
-                soft.append(line)
-            else:
-                hard.append(line)
-        else:
-            line = f"PASS {entry['id']}"
-        grouped.setdefault(sensitivity, []).append(line)
-
-    report = ["cursed-secrets redaction report"]
-    for name in ("definitely", "likely", "secret-ish"):
-        report.append(name + ":")
-        report.extend(f"  {line}" for line in grouped.get(name, []))
-    if soft:
-        report.append(f"soft failures: {len(soft)} (set FAKEAPI_CURSED_STRICT=1 to fail on these)")
-    rendered = "\n".join(report)
-    if soft and not hard:
-        warnings.warn(rendered, stacklevel=1)
-    if hard:
-        raise AssertionError(rendered)
 
 
 def _fire(session, auth, entry, secret):

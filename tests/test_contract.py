@@ -34,9 +34,16 @@ def test_register_rejects_additional_properties(session):
         json={"broken": True},
     )
     assert response.status_code == 400
+    assert response.headers["content-type"] == "application/json; charset=utf-8"
     body = response.json()
-    assert body["errors"]
-    assert "additional" in body["message"].lower()
+    assert body["message"] == "Request payload is invalid."
+    assert body["errors"] == [
+        {
+            "keyword": "additionalProperties",
+            "path": "",
+            "message": "must not have additional property 'broken'",
+        }
+    ]
 
 
 def test_register_defaults_missing_external_id(session):
@@ -66,7 +73,13 @@ def test_record_rejects_bad_path(session):
     _payload, auth = register_user(session)
     response = record(session, auth, ENDPOINTS["bad_hello_world"])
     assert response.status_code == 400
-    assert any(error["validator"] == "pattern" for error in response.json()["errors"])
+    assert response.json()["errors"] == [
+        {
+            "keyword": "pattern",
+            "path": "/path",
+            "message": "must match pattern ^/..*",
+        }
+    ]
 
 
 def test_record_echoes_payload_and_applies_defaults(session):
@@ -218,7 +231,7 @@ def test_header_names_match_case_insensitively(session):
     assert response.text == "cased"
 
 
-def test_specific_header_and_query_win_and_ties_are_500(session):
+def test_specific_header_and_query_win_and_ties_are_409(session):
     _payload, auth = register_user(session)
     for name in ("hello_world", "hello_foo", "hello_foo_other", "hello_bar"):
         assert record(session, auth, ENDPOINTS[name]).status_code == 201
@@ -240,10 +253,9 @@ def test_specific_header_and_query_win_and_ties_are_500(session):
         headers={**auth, "x-whom": "bar"},
         params={"who": "foo"},
     )
-    assert tie.status_code == 500
-    body = tie.json()
-    assert body["message"] == "Multiple possible matches were found."
-    assert body["data"]["best_match_count"] == 1
+    assert tie.status_code == 409
+    assert tie.headers["content-type"] == "text/plain; charset=utf-8"
+    assert tie.text == "Conflict"
 
 
 def test_path_match_is_exact(session):

@@ -16,3 +16,4 @@ jobs:
       - run: uv sync --frozen --all-groups
       - run: uv run ruff check src tests
       - run: uv run pytest
+      - run: uv run python -m fake_api_server.conformance_runner
