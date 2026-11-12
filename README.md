@@ -1,6 +1,8 @@
 # Fake API Server
 
-Python port of [Jacob Mather](https://github.com/jmather)'s fake API. It records arbitrary endpoints in memory and plays the canned responses back, so a test can stand in for a remote service.
+[![CI](https://github.com/jmather/python-fake-api-server/actions/workflows/ci.yml/badge.svg)](https://github.com/jmather/python-fake-api-server/actions/workflows/ci.yml)
+
+Python port of [Jacob Mather](https://github.com/jmather)'s fake API. It records arbitrary endpoints in memory and plays the canned responses back, so a test can stand in for a remote service. Source: [jmather/python-fake-api-server](https://github.com/jmather/python-fake-api-server).
 
 The HTTP contract matches [node-fake-api-server](https://github.com/jmather/node-fake-api-server) and [FakeApi.Server.AspNetCore](https://github.com/jmather/FakeApi.Server.AspNetCore). JSON is snake_case. This process is the one the Python redaction libraries call.
 

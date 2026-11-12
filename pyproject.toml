@@ -6,6 +6,11 @@ readme = "README.md"
 authors = [{ name = "Jacob Mather" }]
 requires-python = ">=3.12"
 license = "Apache-2.0"
+
+[project.urls]
+Homepage = "https://github.com/jmather/python-fake-api-server"
+Repository = "https://github.com/jmather/python-fake-api-server"
+Issues = "https://github.com/jmather/python-fake-api-server/issues"
 dependencies = [
     "fastapi>=0.115",
     "jsonschema>=4.23",
