@@ -464,7 +464,10 @@ def _compare_json(
         return problems
     if isinstance(expected, str):
         expected = _interp(expected, variables)
-    if actual != expected:
+    if (
+        actual != expected
+        or isinstance(expected, bool) != isinstance(actual, bool)
+    ):
         return [f"{path} {actual!r} != {expected!r}"]
     return []
 
