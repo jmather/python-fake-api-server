@@ -133,10 +133,11 @@ def test_levels_follow_status(make_session):
             "responses": [{"status": 200, "content": "b", "content_type": "text/plain"}],
         },
     )
-    session.get("/hello-tie", headers={**auth, "x-a": "1"}, params={"q": "1"})
+    tied = session.get("/hello-tie", headers={**auth, "x-a": "1"}, params={"q": "1"})
+    assert tied.status_code == 409
     error = _records(session)[-1]
-    assert error["status"] == 500
-    assert error["level"] == "error"
+    assert error["status"] == 409
+    assert error["level"] == "warn"
 
 
 def test_capture_headers_omits_bodies_and_all_keeps_raw_text(make_session):
@@ -368,3 +369,66 @@ def test_formatters_are_logging_formatters():
 def test_invalid_capture_is_rejected():
     with pytest.raises(ValueError):
         create_app(capture="bodies")
+
+
+def test_object_hook_runs_before_the_string_hook(make_session, tmp_path):
+    events = []
+
+    def record_hook(record):
+        events.append("object")
+        updated = dict(record)
+        updated["msg"] = "request completed [stamped]"
+        return updated
+
+    def string_hook(serialized, format):
+        events.append((format, "request completed [stamped]" in serialized))
+        return serialized
+
+    xml_path = tmp_path / "hook.xml"
+    session = make_session(
+        capture="none",
+        xml_path=str(xml_path),
+        log_hook=string_hook,
+        record_hook=record_hook,
+    )
+    register_user(session, "hooks")
+    assert events[0] == "object"
+    assert events[1] == ("json", True)
+    assert events[2] == ("xml", True)
+    row = _records(session)[-1]
+    assert row["msg"] == "request completed [stamped]"
+    assert "<msg>request completed [stamped]</msg>" in xml_path.read_text(encoding="utf-8")
+
+
+def test_bearer_does_not_populate_log_user(make_session):
+    session = make_session()
+    payload, _auth = register_user(session)
+    record(
+        session,
+        {"Authorization": f"Basic {payload['auth_token']}"},
+        {
+            "method": "get",
+            "path": "/bearer-user",
+            "responses": [{"status": 200, "content": "ok", "content_type": "text/plain"}],
+        },
+    )
+    played = session.get(
+        "/bearer-user",
+        headers={"Authorization": f"Bearer {payload['auth_token']}"},
+    )
+    assert played.status_code == 200
+    assert _records(session)[-1]["user"] is None
+
+
+def test_record_hook_from_env(monkeypatch):
+    monkeypatch.setenv(
+        "FAKEAPI_LOG_RECORD_HOOK",
+        "fake_api_server.conformance_hooks:stamp",
+    )
+    app = create_app(log_stream=__import__("io").StringIO(), capture="none")
+    try:
+        stamped = app.state.fakeapi.record_hook({"msg": "request completed", "status": 200})
+        assert stamped["msg"] == "request completed [stamped]"
+        assert stamped["status"] == 200
+    finally:
+        app.state.fakeapi.store.stop()

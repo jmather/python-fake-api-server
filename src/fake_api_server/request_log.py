@@ -1,8 +1,9 @@
 """Request logging: JSON lines on stdout, optional XML file, pre-write hook.
 
-Both sinks go through the standard library logging module. A Formatter
-serializes the record. The Handler calls the redaction hook with that string
-and writes whatever the hook returns.
+Both sinks go through the standard library logging module. The app runs the
+object hook first. A Formatter then serializes that record. The Handler calls
+the string hook with ``(serialized, "json"|"xml")`` and writes whatever it
+returns.
 """
 
 import json

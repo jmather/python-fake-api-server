@@ -1,6 +1,5 @@
 """User store: credentials, idle expiry, and the purge sweep."""
 
-import time
 from datetime import timedelta
 
 from fake_api_server.store import UserStore
@@ -23,10 +22,18 @@ def test_purge_drops_idle_users_and_keeps_fresh_ones():
     store = UserStore(max_idle=timedelta(seconds=10), purge_interval=timedelta(hours=1))
     expired = store.create("old")
     fresh = store.create("new")
-    expired.last_active = time.time() - 11
+    expired.last_active = store.now_ms() - 11_000
     assert store.purge() == 1
     assert store.get(expired.username) is None
     assert store.get(fresh.username) is fresh
+
+
+def test_exact_idle_limit_is_still_valid():
+    store = UserStore(max_idle=timedelta(hours=2))
+    user = store.create("boundary")
+    user.last_active = 1_700_000_000_000
+    assert store.purge(1_700_000_000_000 + 7_200_000) == 0
+    assert store.purge(1_700_000_000_000 + 7_200_000 + 1) == 1
 
 
 def test_failed_auth_does_not_refresh_and_success_does():

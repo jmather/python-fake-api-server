@@ -1,4 +1,9 @@
-"""In-memory users. Idle users expire after two hours, swept every 15 minutes."""
+"""In-memory users. Idle users expire after two hours, swept every 15 minutes.
+
+``last_active`` is unix epoch milliseconds. A user is purged when
+``last_active < now - max_idle`` (the exact idle limit is still valid).
+A successful authentication refreshes ``last_active``. A failed one does not.
+"""
 
 import base64
 import threading
@@ -10,19 +15,24 @@ from datetime import timedelta
 from fake_api_server.matching import Endpoint, Playback, find_best
 
 IdFactory = Callable[[], str]
+Clock = Callable[[], int]
+
+
+def system_now_ms() -> int:
+    return time.time_ns() // 1_000_000
 
 
 class User:
-    def __init__(self, username: str, password: str, external_id: str) -> None:
+    def __init__(self, username: str, password: str, external_id: str, now_ms: int) -> None:
         self.username = username
         self.password = password
         self.external_id = external_id
-        self.last_active = time.time()
+        self.last_active = now_ms
         self.endpoints: dict[tuple, Endpoint] = {}
 
     @property
     def auth_token(self) -> str:
-        raw = f"{self.username}:{self.password}".encode("ascii")
+        raw = f"{self.username}:{self.password}".encode()
         return base64.b64encode(raw).decode("ascii")
 
 
@@ -33,16 +43,25 @@ class UserStore:
         max_idle: timedelta = timedelta(hours=2),
         purge_interval: timedelta = timedelta(minutes=15),
         id_factory: IdFactory | None = None,
+        clock: Clock | None = None,
+        sweep: bool = True,
     ) -> None:
         self.max_idle = max_idle
         self.purge_interval = purge_interval
         self.id_factory = id_factory or (lambda: str(uuid.uuid4()))
+        self.clock = clock or system_now_ms
+        self.sweep_enabled = sweep
         self.users: dict[str, User] = {}
         self.lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
+    def now_ms(self) -> int:
+        return int(self.clock())
+
     def start(self) -> None:
+        if not self.sweep_enabled:
+            return
         with self.lock:
             if self._thread is not None and self._thread.is_alive():
                 return
@@ -72,7 +91,7 @@ class UserStore:
             while username in self.users:
                 username = self.id_factory()
             password = self.id_factory()
-            user = User(username, password, external_id)
+            user = User(username, password, external_id, self.now_ms())
             self.users[username] = user
             return user
 
@@ -86,7 +105,7 @@ class UserStore:
             user = self.users.get(username)
             if user is None or user.password != password:
                 return None
-            user.last_active = time.time()
+            user.last_active = self.now_ms()
             return user
 
     def record(self, user: User, endpoint: Endpoint) -> bool:
@@ -120,9 +139,10 @@ class UserStore:
                 return None
             return endpoint.next_response(randbelow)
 
-    def purge(self, now: float | None = None) -> int:
-        current = time.time() if now is None else now
-        cutoff = current - self.max_idle.total_seconds()
+    def purge(self, now: int | None = None) -> int:
+        current = self.now_ms() if now is None else now
+        idle_ms = int(self.max_idle.total_seconds() * 1000)
+        cutoff = current - idle_ms
         with self.lock:
             stale = [
                 username
